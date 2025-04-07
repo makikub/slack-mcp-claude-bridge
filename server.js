@@ -26,6 +26,98 @@ const anthropic = new Anthropic({
 // メッセージ履歴を保存するオブジェクト (チャネルID => メッセージ配列)
 const messageHistory = {};
 
+// スレッド要約コマンドのリスナー
+app.command('/summarize', async ({ command, ack, respond }) => {
+  try {
+    // コマンドを確認
+    await ack();
+    
+    const { channel_id, text, user_id } = command;
+    
+    // スレッドIDの取得（テキストからスレッドIDを抽出）
+    let thread_ts = text.trim();
+    
+    if (!thread_ts) {
+      return await respond('要約するスレッドのIDを指定してください。使い方: /summarize [スレッドID]');
+    }
+    
+    // "タイピング中"のインジケータを表示
+    await respond({
+      text: "スレッドを要約中...",
+      response_type: 'ephemeral'
+    });
+    
+    // スレッドの会話履歴を取得
+    const result = await webClient.conversations.replies({
+      channel: channel_id,
+      ts: thread_ts
+    });
+    
+    if (!result.messages || result.messages.length === 0) {
+      return await respond('指定されたスレッドが見つからないか、メッセージがありません。');
+    }
+    
+    // メッセージを処理して会話履歴を作成
+    const messages = [];
+    
+    for (const message of result.messages) {
+      // botのメッセージはスキップしない（要約に含める）
+      if (message.user) {
+        try {
+          // ユーザー情報を取得
+          const userInfo = await webClient.users.info({ user: message.user });
+          const userName = userInfo.user.real_name || userInfo.user.name;
+          
+          messages.push({
+            role: message.bot_id ? 'assistant' : 'user',
+            content: message.text,
+            name: userName
+          });
+        } catch (error) {
+          // ユーザー情報が取得できない場合は名前なしで追加
+          messages.push({
+            role: message.bot_id ? 'assistant' : 'user',
+            content: message.text
+          });
+        }
+      }
+    }
+    
+    // 要約のためのプロンプト
+    const summaryPrompt = {
+      role: 'user',
+      content: 'このスレッドの内容を簡潔に要約してください。重要なポイントや結論を含めてください。'
+    };
+    
+    // Claude APIにリクエスト（会話履歴 + 要約プロンプト）
+    const response = await anthropic.messages.create({
+      model: "claude-3-7-sonnet-20250219",
+      max_tokens: 4000,
+      messages: [...messages, summaryPrompt],
+    });
+    
+    // 要約結果をスレッドに返信
+    await webClient.chat.postMessage({
+      channel: channel_id,
+      thread_ts: thread_ts,
+      text: `*スレッド要約*\n\n${response.content[0].text}`
+    });
+    
+    // コマンド実行者にも通知
+    await respond({
+      text: '要約が完了しました。スレッドをご確認ください。',
+      response_type: 'ephemeral'
+    });
+    
+  } catch (error) {
+    console.error('要約処理中にエラーが発生しました:', error);
+    await respond({
+      text: '要約処理中にエラーが発生しました。',
+      response_type: 'ephemeral'
+    });
+  }
+});
+
 // メッセージイベントのリスナー
 app.message(async ({ message, say }) => {
   try {
